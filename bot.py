@@ -13,6 +13,7 @@ logging.basicConfig(level=logging.INFO)
 
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
+TZ = os.getenv("TZ", "Europe/Moscow")
 MSG = "{}, не забудь: {}"
 
 
@@ -63,11 +64,17 @@ async def set_reminder(message: types.Message):
         reminder_datetime = datetime.combine(date, time)
         reminder_text = args[3]
 
-        user_timezone = "Europe/Moscow"
+        user_timezone = TZ
 
         local_tz = pytz.timezone(user_timezone)
         local_dt = local_tz.localize(reminder_datetime)
         reminder_time_utc = local_dt.astimezone(pytz.utc)
+
+        now_utc = datetime.now(pytz.utc).replace(second=0, microsecond=0)
+        if reminder_time_utc < now_utc:
+            raise ValueError(
+                "Указанная дата и время не могут быть меньше текущей даты и времени."
+            )
 
         cursor.execute(
             "INSERT INTO reminders (user_id, reminder_text, reminder_time, timezone) "
