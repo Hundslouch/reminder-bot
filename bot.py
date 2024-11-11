@@ -151,21 +151,23 @@ async def set_reminder(message: types.Message):
 async def check_reminders():
     while True:
         async with db() as session:
-            now = datetime.now(pytz.utc)
+            now_utc = datetime.now(pytz.utc)
 
-            result = await session.execute(
-                select(Reminder).where(Reminder.reminder_time <= now)
-            )
+            result = await session.execute(select(Reminder))
             reminders = result.scalars().all()
 
             for reminder in reminders:
-                await bot.send_message(
-                    reminder.user_id,
-                    MSG.format(reminder.username, reminder.reminder_text),
-                )
+                user_tz = pytz.timezone(reminder.timezone)
+                reminder_time_local = reminder.reminder_time.astimezone(user_tz)
 
-                await session.delete(reminder)
-                await session.commit()
+                if reminder_time_local <= now_utc.astimezone(user_tz):
+                    await bot.send_message(
+                        reminder.user_id,
+                        MSG.format(reminder.username, reminder.reminder_text),
+                    )
+
+                    await session.delete(reminder)
+                    await session.commit()
 
         await asyncio.sleep(60)
 
