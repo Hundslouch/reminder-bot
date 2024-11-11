@@ -1,12 +1,13 @@
 import logging
 import os
-import sqlite3
 import asyncio
 from datetime import datetime
 import pytz
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, executor, types
-
+from sqlalchemy import create_engine, Column, Integer, String, DateTime
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -21,22 +22,24 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher(bot=bot)
 
 
-conn = sqlite3.connect("reminders.db")
-cursor = conn.cursor()
+DATABASE_URL = "sqlite:///reminders.db"
+engine = create_engine(DATABASE_URL)
+Session = sessionmaker(bind=engine)
+session = Session()
+Base = declarative_base()
 
 
-cursor.execute(
-    """
-CREATE TABLE IF NOT EXISTS reminders (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    reminder_text TEXT,
-    reminder_time TEXT,
-    timezone TEXT
-)
-"""
-)
-conn.commit()
+class Reminder(Base):
+    __tablename__ = "reminders"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer)
+    reminder_text = Column(String)
+    reminder_time = Column(DateTime)
+    timezone = Column(String)
+
+
+Base.metadata.create_all(engine)
+logger.info("Таблица 'reminders' создана")
 
 
 @dp.message_handler(commands=["start"])
@@ -70,17 +73,20 @@ async def set_reminder(message: types.Message):
         local_dt = local_tz.localize(reminder_datetime)
         reminder_time_utc = local_dt.astimezone(pytz.utc)
 
-        cursor.execute(
-            "INSERT INTO reminders (user_id, reminder_text, reminder_time, timezone) "
-            "VALUES (?, ?, ?, ?)",
-            (
-                message.from_user.id,
-                reminder_text,
-                reminder_time_utc.isoformat(),
-                user_timezone,
-            ),
+        now_utc = datetime.now(pytz.utc).replace(second=0, microsecond=0)
+        if reminder_time_utc < now_utc:
+            raise ValueError(
+                "Указанная дата и время не могут быть меньше текущей даты и времени."
+            )
+
+        reminder = Reminder(
+            user_id=message.from_user.id,
+            reminder_text=reminder_text,
+            reminder_time=reminder_time_utc,
+            timezone=user_timezone,
         )
-        conn.commit()
+        session.add(reminder)
+        session.commit()
 
         await message.reply(
             f"Напоминание установлено на {reminder_datetime} ({user_timezone}): {reminder_text}"
@@ -94,19 +100,16 @@ async def check_reminders():
     while True:
         now = datetime.now(pytz.utc)
 
-        cursor.execute(
-            "SELECT id, user_id, reminder_text FROM reminders WHERE reminder_time <= ?",
-            (now.isoformat(),),
-        )
-        reminders = cursor.fetchall()
+        reminders = session.query(Reminder).filter(Reminder.reminder_time <= now).all()
 
         for reminder in reminders:
-            reminder_id, user_id, reminder_text = reminder
 
-            await bot.send_message(user_id, MSG.format(user_id, reminder_text))
+            await bot.send_message(
+                reminder.user_id, MSG.format(reminder.user_id, reminder.reminder_text)
+            )
 
-            cursor.execute("DELETE FROM reminders WHERE id = ?", (reminder_id,))
-            conn.commit()
+            session.delete(reminder)
+            session.commit()
 
         await asyncio.sleep(60)
 
