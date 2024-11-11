@@ -70,12 +70,6 @@ async def set_reminder(message: types.Message):
         local_dt = local_tz.localize(reminder_datetime)
         reminder_time_utc = local_dt.astimezone(pytz.utc)
 
-        now_utc = datetime.now(pytz.utc).replace(second=0, microsecond=0)
-        if reminder_time_utc < now_utc:
-            raise ValueError(
-                "Указанная дата и время не могут быть меньше текущей даты и времени."
-            )
-
         cursor.execute(
             "INSERT INTO reminders (user_id, reminder_text, reminder_time, timezone) "
             "VALUES (?, ?, ?, ?)",
