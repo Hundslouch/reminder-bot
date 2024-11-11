@@ -9,6 +9,7 @@ from sqlalchemy import create_engine, Column, Integer, String, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
+
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
@@ -33,6 +34,7 @@ class Reminder(Base):
     __tablename__ = "reminders"
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer)
+    username = Column(String)
     reminder_text = Column(String)
     reminder_time = Column(DateTime)
     timezone = Column(String)
@@ -81,6 +83,7 @@ async def set_reminder(message: types.Message):
 
         reminder = Reminder(
             user_id=message.from_user.id,
+            username=message.from_user.username,
             reminder_text=reminder_text,
             reminder_time=reminder_time_utc,
             timezone=user_timezone,
@@ -105,7 +108,7 @@ async def check_reminders():
         for reminder in reminders:
 
             await bot.send_message(
-                reminder.user_id, MSG.format(reminder.user_id, reminder.reminder_text)
+                reminder.user_id, MSG.format(reminder.username, reminder.reminder_text)
             )
 
             session.delete(reminder)
