@@ -9,6 +9,8 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy import select, update
 from sqlalchemy.orm import sessionmaker, Mapped, mapped_column
+from sqlalchemy import ForeignKey
+from sqlalchemy.orm import relationship
 
 
 logger = logging.getLogger(__name__)
@@ -30,14 +32,23 @@ db = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 Base = declarative_base()
 
 
+class User(Base):
+    __tablename__ = "users"
+    user_id: Mapped[int] = mapped_column(primary_key=True, autoincrement=False)
+    username: Mapped[str] = mapped_column()
+    timezone: Mapped[str] = mapped_column()
+
+    reminders = relationship("Reminder", back_populates="user")
+
+
 class Reminder(Base):
     __tablename__ = "reminders"
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column()
-    username: Mapped[str] = mapped_column()
+    reminder_id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.user_id"))
     reminder_text: Mapped[str] = mapped_column()
     reminder_time: Mapped[datetime] = mapped_column()
-    timezone: Mapped[str] = mapped_column()
+
+    user = relationship("User", back_populates="reminders")
 
 
 async def init_db():
@@ -48,9 +59,26 @@ async def init_db():
 
 @dp.message_handler(commands=["start"])
 async def start_handler(message: types.Message):
-    user_full_name = message.from_user.full_name
+    user_id = message.from_user.id
+    username = message.from_user.first_name
+
+    async with db() as session:
+
+        result = await session.execute(select(User).where(User.user_id == user_id))
+        user = result.scalar_one_or_none()
+
+        if not user:
+
+            new_user = User(
+                user_id=user_id,
+                username=username,
+                timezone="Europe/Moscow",
+            )
+            session.add(new_user)
+            await session.commit()
+
     await message.reply(
-        f"Привет, {user_full_name}, я твой бот-напоминалка. \n"
+        f"Привет, {username}, я твой бот-напоминалка. \n"
         f"Используй /set_reminder, чтобы создать напоминание. \n"
         "Используй /set_timezone, чтобы установить свой часовой пояс."
     )
@@ -63,7 +91,7 @@ async def set_timezone(message: types.Message):
             args = message.text.split(" ", 1)
             if len(args) < 2:
                 raise ValueError(
-                    "Неверный формат команды. Пример: /set_timezone Europe/Moscow"
+                    "Неверный формат команды. Пример: /set_timezone America/New_York"
                 )
 
             user_timezone = args[1]
@@ -74,11 +102,25 @@ async def set_timezone(message: types.Message):
                 )
 
             user_id = message.from_user.id
-            await session.execute(
-                update(Reminder)
-                .where(Reminder.user_id == user_id)
-                .values(timezone=user_timezone)
-            )
+            username = message.from_user.username
+
+            result = await session.execute(select(User).where(User.user_id == user_id))
+            user = result.scalar_one_or_none()
+
+            if user:
+
+                await session.execute(
+                    update(User)
+                    .where(User.user_id == user_id)
+                    .values(timezone=user_timezone)
+                )
+            else:
+
+                new_user = User(
+                    user_id=user_id, username=username, timezone=user_timezone
+                )
+                session.add(new_user)
+
             await session.commit()
 
             await message.reply(f"Часовой пояс установлен: {user_timezone}")
@@ -107,12 +149,10 @@ async def set_reminder(message: types.Message):
                 raise ValueError("Текст напоминания не может быть пустым.")
 
             user_id = message.from_user.id
-            result = await session.execute(
-                select(Reminder).where(Reminder.user_id == user_id)
-            )
-            reminder: Reminder = result.scalars().first()
-            if reminder:
-                user_timezone = reminder.timezone if reminder.timezone else DEFAULT_TZ
+            result = await session.execute(select(User).where(User.user_id == user_id))
+            user = result.scalars().first()
+            if user:
+                user_timezone = user.timezone if user.timezone else DEFAULT_TZ
             else:
                 user_timezone = DEFAULT_TZ
 
@@ -126,18 +166,12 @@ async def set_reminder(message: types.Message):
                     "Указанная дата и время не могут быть меньше текущей даты и времени."
                 )
 
-            if reminder:
-                reminder.reminder_text = reminder_text
-                reminder.reminder_time = reminder_time_utc
-            else:
-                reminder = Reminder(
-                    user_id=user_id,
-                    username=message.from_user.first_name,
-                    reminder_text=reminder_text,
-                    reminder_time=reminder_time_utc,
-                    timezone=user_timezone,
-                )
-                session.add(reminder)
+            reminder = Reminder(
+                user_id=user_id,
+                reminder_text=reminder_text,
+                reminder_time=reminder_time_utc,
+            )
+            session.add(reminder)
             await session.commit()
 
             await message.reply(
@@ -151,19 +185,24 @@ async def set_reminder(message: types.Message):
 async def check_reminders():
     while True:
         async with db() as session:
-            now_utc = datetime.now(pytz.utc)
+            now_utc = datetime.now(pytz.utc).replace(second=0, microsecond=0)
 
-            result = await session.execute(select(Reminder))
+            result = await session.execute(
+                select(Reminder).join(User, Reminder.user_id == User.user_id)
+            )
             reminders = result.scalars().all()
 
             for reminder in reminders:
-                user_tz = pytz.timezone(reminder.timezone)
-                reminder_time_local = reminder.reminder_time.astimezone(user_tz)
+                user = await session.get(User, reminder.user_id)
+                user_tz = pytz.timezone(user.timezone)
+                reminder_time_local = reminder.reminder_time.astimezone(
+                    user_tz
+                ).replace(second=0, microsecond=0)
 
                 if reminder_time_local <= now_utc.astimezone(user_tz):
                     await bot.send_message(
                         reminder.user_id,
-                        MSG.format(reminder.username, reminder.reminder_text),
+                        MSG.format(user.username, reminder.reminder_text),
                     )
 
                     await session.delete(reminder)
